@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+imagenes_productos/
+productos.csv
+.verdent/
