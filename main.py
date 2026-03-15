@@ -1,10 +1,15 @@
 # =============================================================================
 # main.py — Punto de entrada del scraper
 # =============================================================================
-# Uso:
+# Uso básico (comportamiento original, sin cambios):
 #   python main.py                          # Usa BASE_URL definida en config.py
 #   python main.py --url https://sitio.com  # Sobreescribe BASE_URL desde CLI
-#   python main.py --url https://sitio.com --log DEBUG  # Nivel de log detallado
+#   python main.py --url https://sitio.com --log DEBUG
+#
+# NUEVO — Flujo con archivo de URLs y caché de HTML:
+#   python main.py                          # Si existe urls.txt, muestra el menú
+#   python main.py --urls-file mis_urls.txt # Usa un archivo de URLs personalizado
+#   python main.py --no-cache               # Saltea la fase de caché (flujo directo)
 #
 # Instalación de dependencias:
 #   pip install requests beautifulsoup4 lxml
@@ -15,9 +20,15 @@ import argparse
 import logging
 import sys
 import time
+from pathlib import Path
+
+import requests
 
 import config
+import html_cache    # NUEVO
 import scraper
+import storage
+import url_manager   # NUEVO
 
 
 def setup_logging(level: str) -> None:
@@ -47,7 +58,8 @@ def parse_args() -> argparse.Namespace:
             "Ejemplos:\n"
             "  python main.py\n"
             "  python main.py --url https://www.tienda.com\n"
-            "  python main.py --url https://www.tienda.com --log DEBUG\n"
+            "  python main.py --urls-file mis_urls.txt\n"
+            "  python main.py --no-cache --log DEBUG\n"
         ),
     )
 
@@ -57,8 +69,33 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="URL",
         help=(
-            "URL base del sitio a scrapear. "
-            "Si no se proporciona, se usa BASE_URL definida en config.py."
+            "URL del listado a scrapear. "
+            "Si no se proporciona, se usa BASE_URL + PRODUCTS_PATH de config.py "
+            "o las URLs del archivo urls.txt si existe."
+        ),
+    )
+
+    # NUEVO
+    parser_args.add_argument(
+        "--urls-file",
+        type=str,
+        default=None,
+        metavar="ARCHIVO",
+        help=(
+            f"Ruta al archivo de texto con las URLs (una por línea). "
+            f"Por defecto: '{config.URLS_FILE}' (definido en config.py)."
+        ),
+    )
+
+    # NUEVO
+    parser_args.add_argument(
+        "--no-cache",
+        action="store_true",
+        default=False,
+        help=(
+            "Deshabilita la descarga previa de HTML. "
+            "El scraper hace los requests directamente sin guardar en disco. "
+            "Comportamiento idéntico al flujo original."
         ),
     )
 
@@ -74,43 +111,203 @@ def parse_args() -> argparse.Namespace:
     return parser_args.parse_args()
 
 
+# =============================================================================
+# NUEVO — Flujo con caché de HTML (FASE 1 + FASE 2)
+# =============================================================================
+
+def _run_with_cache(listing_url: str, csv_path: str) -> tuple:
+    """
+    Ejecuta el scraping en dos fases para una URL dada:
+
+    FASE 1 — Descarga y guarda todos los HTML del listado en disco.
+    FASE 2 — Parsea los productos a partir de los archivos guardados.
+
+    Parámetros:
+        listing_url (str): URL completa del listado de productos.
+        csv_path    (str): Ruta del archivo CSV de salida.
+
+    Retorna:
+        (total_ok, total_errores)
+    """
+    logger = logging.getLogger(__name__)
+
+    session = requests.Session()
+    session.headers.update(config.HEADERS)
+
+    try:
+        # --- FASE 1: Descargar todo el HTML a disco ---
+        logger.info("FASE 1 — Descargando HTML de: %s", listing_url)
+        cached_pages = html_cache.download_listing_pages(
+            session=session,
+            listing_url=listing_url,
+            cache_dir=config.HTML_CACHE_DIR,
+        )
+
+        if not cached_pages:
+            logger.warning("FASE 1 fallida: no se pudo descargar HTML de: %s", listing_url)
+            return 0, 0
+
+        logger.info("FASE 1 completada: %d página(s) guardadas.", len(cached_pages))
+
+        # --- FASE 2: Parsear desde los archivos HTML guardados ---
+        logger.info("FASE 2 — Parseando desde caché local...")
+        products, error_count = scraper.scrape_from_cached_pages(session, cached_pages)
+
+        if not products:
+            logger.warning("FASE 2: sin productos extraídos de: %s", listing_url)
+            return 0, error_count
+
+        # Guardar CSV
+        storage.save_csv(products, csv_path)
+        return len(products), error_count
+
+    finally:
+        session.close()
+
+
+# =============================================================================
+# Resolución de URLs a scrapear
+# =============================================================================
+
+def _resolve_urls(args) -> list:
+    """
+    Determina la lista de URLs a scrapear según los argumentos recibidos.
+
+    Prioridad:
+        1. --url <URL>      → usa esa URL directamente, sin menú
+        2. --urls-file / urls.txt existe → carga el archivo y muestra el menú
+        3. Fallback         → usa config.BASE_URL + config.PRODUCTS_PATH
+
+    Retorna:
+        Lista de URLs (strings) a procesar.
+    """
+    logger = logging.getLogger(__name__)
+
+    # 1. URL individual por CLI → sin menú
+    if args.url:
+        logger.info("URL proporcionada por CLI: %s", args.url)
+        return [args.url]
+
+    # 2. Archivo de URLs
+    urls_file = args.urls_file or config.URLS_FILE
+    if Path(urls_file).exists():
+        try:
+            all_urls = url_manager.load_urls(urls_file)
+        except FileNotFoundError as e:
+            logger.warning("No se pudo leer el archivo de URLs: %s", e)
+            all_urls = []
+
+        if all_urls:
+            if len(all_urls) == 1:
+                # Con una sola URL no tiene sentido mostrar el menú
+                logger.info("Una sola URL en '%s': %s", urls_file, all_urls[0])
+                return all_urls
+
+            # Mostrar menú interactivo
+            selected = url_manager.interactive_menu(all_urls)
+            if selected:
+                return selected
+            # Si el usuario cancela el menú, salir limpiamente
+            logger.info("Selección cancelada por el usuario.")
+            sys.exit(0)
+
+    # 3. Fallback a configuración
+    fallback = config.BASE_URL + config.PRODUCTS_PATH
+    logger.info("urls.txt no encontrado. Usando URL de config: %s", fallback)
+    return [fallback]
+
+
+# =============================================================================
+# Generación del nombre de CSV para cada URL
+# =============================================================================
+
+def _csv_path_for_url(listing_url: str, total_urls: int, index: int) -> str:
+    """
+    Determina el nombre del CSV de salida para una URL dada.
+
+    - Una sola URL  → usa config.OUTPUT_CSV (comportamiento original)
+    - Múltiples URLs → genera "productos_<slug>.csv" para evitar sobreescrituras
+    """
+    if total_urls == 1:
+        return config.OUTPUT_CSV
+
+    slug = html_cache.url_to_slug(listing_url)
+    # Limitar longitud del slug para nombres de archivo razonables
+    slug = slug[:60].rstrip("_")
+    return f"productos_{slug}.csv"
+
+
+# =============================================================================
+# Punto de entrada principal
+# =============================================================================
+
 def main() -> None:
     args = parse_args()
     setup_logging(args.log)
 
     logger = logging.getLogger(__name__)
 
-    # Mostrar configuración activa al inicio
-    effective_url = args.url or config.BASE_URL
+    # --- Resolver URLs ---
+    urls_to_scrape = _resolve_urls(args)
+
+    # --- Mostrar configuración activa ---
     logger.info("=" * 60)
     logger.info("Scraper de productos iniciado")
-    logger.info("URL objetivo  : %s", effective_url)
-    logger.info("Sección       : %s", config.PRODUCTS_PATH)
-    logger.info("Modo          : %s", "Selenium (JS)" if config.USE_SELENIUM else "requests (HTML estático)")
-    logger.info("CSV salida    : %s", config.OUTPUT_CSV)
-    logger.info("Carpeta imag. : %s", config.IMAGES_DIR)
-    logger.info("Pausa requests: %.1f seg", config.REQUEST_DELAY)
+    logger.info("URLs a procesar  : %d", len(urls_to_scrape))
+    logger.info("Modo requests    : %s", "Selenium (JS)" if config.USE_SELENIUM else "requests (HTML estático)")
+    logger.info("Caché de HTML    : %s", "DESHABILITADO (--no-cache)" if args.no_cache else config.HTML_CACHE_DIR)
+    logger.info("Carpeta imag.    : %s", config.IMAGES_DIR)
+    logger.info("Pausa requests   : %.1f seg", config.REQUEST_DELAY)
     logger.info("=" * 60)
 
     start_time = time.time()
+    grand_total_ok = 0
+    grand_total_errors = 0
 
-    try:
-        total_ok, total_errors = scraper.run(base_url=args.url)
-    except KeyboardInterrupt:
-        logger.warning("Scraping interrumpido por el usuario (Ctrl+C).")
-        sys.exit(0)
-    except Exception as e:
-        logger.critical("Error fatal no recuperable: %s", e, exc_info=True)
-        sys.exit(1)
+    for i, listing_url in enumerate(urls_to_scrape, start=1):
+        csv_path = _csv_path_for_url(listing_url, len(urls_to_scrape), i)
 
+        logger.info("")
+        logger.info("── URL %d/%d ──────────────────────────────────────────", i, len(urls_to_scrape))
+        logger.info("Listado : %s", listing_url)
+        logger.info("CSV     : %s", csv_path)
+        logger.info("")
+
+        try:
+            # NUEVO — Flujo con caché (por defecto) vs. flujo directo (--no-cache)
+            if args.no_cache:
+                total_ok, total_errors = scraper.run(
+                    listing_url_override=listing_url,
+                    output_csv=csv_path,
+                )
+            else:
+                total_ok, total_errors = _run_with_cache(listing_url, csv_path)
+
+        except KeyboardInterrupt:
+            logger.warning("Scraping interrumpido por el usuario (Ctrl+C).")
+            sys.exit(0)
+        except Exception as e:
+            logger.critical("Error fatal procesando '%s': %s", listing_url, e, exc_info=True)
+            total_ok, total_errors = 0, 1
+
+        grand_total_ok += total_ok
+        grand_total_errors += total_errors
+
+        logger.info("Resultado URL %d: %d productos, %d errores — CSV: %s",
+                    i, total_ok, total_errors, csv_path)
+
+    # --- Resumen final ---
     elapsed = time.time() - start_time
-
-    # Resumen final
+    logger.info("")
     logger.info("=" * 60)
     logger.info("Scraping completado en %.1f segundos", elapsed)
-    logger.info("Productos guardados : %d", total_ok)
-    logger.info("Errores             : %d", total_errors)
-    logger.info("Archivo CSV         : %s", config.OUTPUT_CSV)
+    logger.info("URLs procesadas     : %d", len(urls_to_scrape))
+    logger.info("Productos guardados : %d", grand_total_ok)
+    logger.info("Errores totales     : %d", grand_total_errors)
+    if len(urls_to_scrape) == 1:
+        logger.info("Archivo CSV         : %s", _csv_path_for_url(urls_to_scrape[0], 1, 1))
+    else:
+        logger.info("Archivos CSV        : productos_<slug>.csv por cada URL")
     logger.info("Imágenes en         : %s/", config.IMAGES_DIR)
     logger.info("=" * 60)
 

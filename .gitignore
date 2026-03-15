@@ -1,6 +1,35 @@
-__pycache__/
-*.pyc
-*.pyo
+﻿# Cache de HTML descargado
+html_cache/
+
+# Imagenes descargadas
 imagenes_productos/
-productos.csv
-.verdent/
+
+# CSV generados
+productos*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Entornos virtuales
+venv/
+env/
+.venv/
+.env/
+
+# Logs
+*.log
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

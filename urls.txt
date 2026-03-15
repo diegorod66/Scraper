@@ -1,0 +1,5 @@
+# URLs para scrapear — una por línea
+# Líneas que comienzan con # son ignoradas
+# Líneas vacías son ignoradas
+
+https://www.mayoristaomega.com.ar/lista-de-productos

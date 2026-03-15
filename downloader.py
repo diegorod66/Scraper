@@ -98,6 +98,7 @@ def download_image(
                     f.write(chunk)
 
         logger.info("Imagen guardada: %s", local_path)
+        time.sleep(getattr(config, "IMAGE_DOWNLOAD_DELAY", 0.5))
         return str(local_path)
 
     except requests.exceptions.Timeout:
