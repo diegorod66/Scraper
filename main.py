@@ -6,10 +6,16 @@
 #   python main.py --url https://sitio.com  # Sobreescribe BASE_URL desde CLI
 #   python main.py --url https://sitio.com --log DEBUG
 #
-# NUEVO — Flujo con archivo de URLs y caché de HTML:
+# Flujo con archivo de URLs y caché de HTML:
 #   python main.py                          # Si existe urls.txt, muestra el menú
 #   python main.py --urls-file mis_urls.txt # Usa un archivo de URLs personalizado
 #   python main.py --no-cache               # Saltea la fase de caché (flujo directo)
+#
+# Estructura de salida generada automáticamente por ejecución:
+#   {nombre_sitio}_{YYYY-MM-DD}/
+#       productos.csv          ← datos de todos los productos scrapeados
+#       imagenes_productos/    ← imágenes descargadas
+#       scraper.log            ← log completo de la sesión
 #
 # Instalación de dependencias:
 #   pip install requests beautifulsoup4 lxml
@@ -25,10 +31,12 @@ from pathlib import Path
 import requests
 
 import config
-import html_cache    # NUEVO
+import downloader    # necesario para init_dedup_index
+import html_cache
+import output_manager  # NUEVO
 import scraper
 import storage
-import url_manager   # NUEVO
+import url_manager
 
 
 def setup_logging(level: str) -> None:
@@ -75,7 +83,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    # NUEVO
     parser_args.add_argument(
         "--urls-file",
         type=str,
@@ -87,7 +94,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    # NUEVO
     parser_args.add_argument(
         "--no-cache",
         action="store_true",
@@ -112,7 +118,7 @@ def parse_args() -> argparse.Namespace:
 
 
 # =============================================================================
-# NUEVO — Flujo con caché de HTML (FASE 1 + FASE 2)
+# Flujo con caché de HTML (FASE 1 + FASE 2)
 # =============================================================================
 
 def _run_with_cache(listing_url: str, csv_path: str) -> tuple:
@@ -199,15 +205,12 @@ def _resolve_urls(args) -> list:
 
         if all_urls:
             if len(all_urls) == 1:
-                # Con una sola URL no tiene sentido mostrar el menú
                 logger.info("Una sola URL en '%s': %s", urls_file, all_urls[0])
                 return all_urls
 
-            # Mostrar menú interactivo
             selected = url_manager.interactive_menu(all_urls)
             if selected:
                 return selected
-            # Si el usuario cancela el menú, salir limpiamente
             logger.info("Selección cancelada por el usuario.")
             sys.exit(0)
 
@@ -218,23 +221,31 @@ def _resolve_urls(args) -> list:
 
 
 # =============================================================================
-# Generación del nombre de CSV para cada URL
+# Configuración de rutas de salida por URL  (MODIFICADO)
 # =============================================================================
 
-def _csv_path_for_url(listing_url: str, total_urls: int, index: int) -> str:
+def _configure_output_paths(output_dir: Path) -> tuple[str, str]:
     """
-    Determina el nombre del CSV de salida para una URL dada.
+    Actualiza config.OUTPUT_CSV y config.IMAGES_DIR para apuntar dentro de
+    output_dir y retorna ambas rutas como strings.
 
-    - Una sola URL  → usa config.OUTPUT_CSV (comportamiento original)
-    - Múltiples URLs → genera "productos_<slug>.csv" para evitar sobreescrituras
+    Al actualizar el módulo config en tiempo de ejecución, todos los módulos
+    (scraper, downloader, storage) usan automáticamente las rutas correctas
+    sin necesidad de pasarlas explícitamente por cada función.
+
+    Parámetros:
+        output_dir (Path): Carpeta de salida de la sesión actual.
+
+    Retorna:
+        (csv_path, images_dir)
     """
-    if total_urls == 1:
-        return config.OUTPUT_CSV
+    csv_path = str(output_dir / "productos.csv")
+    images_dir = str(output_dir / "imagenes_productos")
 
-    slug = html_cache.url_to_slug(listing_url)
-    # Limitar longitud del slug para nombres de archivo razonables
-    slug = slug[:60].rstrip("_")
-    return f"productos_{slug}.csv"
+    config.OUTPUT_CSV = csv_path
+    config.IMAGES_DIR = images_dir
+
+    return csv_path, images_dir
 
 
 # =============================================================================
@@ -256,7 +267,6 @@ def main() -> None:
     logger.info("URLs a procesar  : %d", len(urls_to_scrape))
     logger.info("Modo requests    : %s", "Selenium (JS)" if config.USE_SELENIUM else "requests (HTML estático)")
     logger.info("Caché de HTML    : %s", "DESHABILITADO (--no-cache)" if args.no_cache else config.HTML_CACHE_DIR)
-    logger.info("Carpeta imag.    : %s", config.IMAGES_DIR)
     logger.info("Pausa requests   : %.1f seg", config.REQUEST_DELAY)
     logger.info("=" * 60)
 
@@ -265,16 +275,36 @@ def main() -> None:
     grand_total_errors = 0
 
     for i, listing_url in enumerate(urls_to_scrape, start=1):
-        csv_path = _csv_path_for_url(listing_url, len(urls_to_scrape), i)
 
         logger.info("")
         logger.info("── URL %d/%d ──────────────────────────────────────────", i, len(urls_to_scrape))
         logger.info("Listado : %s", listing_url)
+
+        # ----------------------------------------------------------------
+        # NUEVO — Crear carpeta de salida dinámica para esta URL
+        # ----------------------------------------------------------------
+        output_dir = output_manager.create_output_dir(listing_url)
+
+        # ----------------------------------------------------------------
+        # NUEVO — Activar logging a archivo dentro de la carpeta de salida
+        # ----------------------------------------------------------------
+        file_handler = output_manager.setup_file_logging(output_dir)
+
+        # ----------------------------------------------------------------
+        # NUEVO — Apuntar config a las rutas dentro de output_dir
+        # ----------------------------------------------------------------
+        csv_path, images_dir = _configure_output_paths(output_dir)
+
         logger.info("CSV     : %s", csv_path)
+        logger.info("Imágenes: %s", images_dir)
         logger.info("")
 
+        # ----------------------------------------------------------------
+        # NUEVO — Inicializar índice MD5 con imágenes ya existentes
+        # ----------------------------------------------------------------
+        downloader.init_dedup_index(images_dir)
+
         try:
-            # NUEVO — Flujo con caché (por defecto) vs. flujo directo (--no-cache)
             if args.no_cache:
                 total_ok, total_errors = scraper.run(
                     listing_url_override=listing_url,
@@ -285,16 +315,26 @@ def main() -> None:
 
         except KeyboardInterrupt:
             logger.warning("Scraping interrumpido por el usuario (Ctrl+C).")
+            output_manager.teardown_file_logging(file_handler)
             sys.exit(0)
         except Exception as e:
-            logger.critical("Error fatal procesando '%s': %s", listing_url, e, exc_info=True)
+            logger.critical(
+                "Error fatal procesando '%s': %s", listing_url, e, exc_info=True
+            )
             total_ok, total_errors = 0, 1
 
         grand_total_ok += total_ok
         grand_total_errors += total_errors
 
-        logger.info("Resultado URL %d: %d productos, %d errores — CSV: %s",
-                    i, total_ok, total_errors, csv_path)
+        logger.info(
+            "Resultado URL %d: %d productos, %d errores — CSV: %s",
+            i, total_ok, total_errors, csv_path,
+        )
+
+        # ----------------------------------------------------------------
+        # NUEVO — Cerrar el log de archivo antes de pasar a la próxima URL
+        # ----------------------------------------------------------------
+        output_manager.teardown_file_logging(file_handler)
 
     # --- Resumen final ---
     elapsed = time.time() - start_time
@@ -304,11 +344,15 @@ def main() -> None:
     logger.info("URLs procesadas     : %d", len(urls_to_scrape))
     logger.info("Productos guardados : %d", grand_total_ok)
     logger.info("Errores totales     : %d", grand_total_errors)
-    if len(urls_to_scrape) == 1:
-        logger.info("Archivo CSV         : %s", _csv_path_for_url(urls_to_scrape[0], 1, 1))
-    else:
-        logger.info("Archivos CSV        : productos_<slug>.csv por cada URL")
-    logger.info("Imágenes en         : %s/", config.IMAGES_DIR)
+    logger.info("Estructura de salida:")
+    for url in urls_to_scrape:
+        site = output_manager.get_site_name(url)
+        from datetime import date
+        folder = f"{site}_{date.today().strftime('%Y-%m-%d')}/"
+        logger.info("  %s", folder)
+        logger.info("    ├── productos.csv")
+        logger.info("    ├── imagenes_productos/")
+        logger.info("    └── scraper.log")
     logger.info("=" * 60)
 
 

@@ -4,9 +4,11 @@ Scraper web modular en Python que recorre un sitio de productos, extrae datos cl
 
 ## Características
 
-- Navegación automática con paginación
+- Navegación automática con paginación (clásica e infinite scroll)
 - Extracción de: nombre, código, precio, stock, descripción e imagen
-- Descarga de imágenes organizadas en `imagenes_productos/`
+- **Carpeta de salida dinámica** por ejecución: `{sitio}_{YYYY-MM-DD}/`
+- **Log de sesión** en `scraper.log` con timestamp de inicio y fin
+- **Deduplicación de imágenes** por nombre de archivo y hash MD5
 - Salida en `productos.csv` compatible con Excel (UTF-8 BOM)
 - Manejo robusto de errores (timeouts, campos vacíos, HTTP errors)
 - Modo JavaScript opcional con Selenium + Chrome headless
@@ -38,7 +40,45 @@ python main.py --url https://www.tienda.com
 
 # Con log detallado
 python main.py --url https://www.tienda.com --log DEBUG
+
+# Sin caché de HTML (flujo directo)
+python main.py --no-cache
+
+# Con archivo de URLs personalizado
+python main.py --urls-file mis_urls.txt
 ```
+
+## Estructura de salida
+
+Cada ejecución genera automáticamente una carpeta con la fecha del día:
+
+```
+{nombre_sitio}_{YYYY-MM-DD}/
+    ├── productos.csv          ← datos de todos los productos scrapeados
+    ├── imagenes_productos/    ← imágenes descargadas (deduplicadas)
+    └── scraper.log            ← log completo de la sesión
+```
+
+**Ejemplo:**
+```
+mayoristaomega.com.ar_2026-03-15/
+    ├── productos.csv
+    ├── imagenes_productos/
+    │   ├── ABC123_Producto_Ejemplo.jpg
+    │   └── ...
+    └── scraper.log
+```
+
+Re-ejecutar el mismo día reutiliza la carpeta existente sin borrar contenido previo.
+
+## Deduplicación de imágenes
+
+Las imágenes se verifican en dos niveles antes de descargarse:
+
+1. **Por nombre de archivo** — si el archivo ya existe en disco, se omite sin tráfico de red.
+2. **Por hash MD5** — si el contenido ya fue descargado (aunque con distinto nombre), se omite y se registra en el log el archivo original con ese contenido.
+
+Ambos eventos quedan registrados en `scraper.log`.
 
 ## Configuración
 
@@ -49,9 +89,11 @@ Edita **`config.py`** antes de ejecutar:
 | `BASE_URL` | URL raíz del sitio objetivo |
 | `PRODUCTS_PATH` | Ruta relativa al listado de productos |
 | `SELECTORS` | Selectores CSS para cada campo (ver tabla abajo) |
-| `REQUEST_DELAY` | Pausa en segundos entre requests (default: `1.5`) |
+| `REQUEST_DELAY` | Pausa en segundos entre requests (default: `2.0`) |
 | `MAX_PAGES` | Límite de páginas de listado a recorrer (`0` = sin límite) |
 | `USE_SELENIUM` | `True` para sitios que requieren JavaScript |
+| `LISTING_MODE` | `True` para extraer datos directo del listado |
+| `LISTING_PAGINATION` | `"infinite_scroll"`, `"css_link"` o `""` |
 
 ### Selectores CSS a adaptar
 
@@ -70,15 +112,7 @@ SELECTORS = {
 }
 ```
 
-## Archivos generados
-
-```
-imagenes_productos/
-    {codigo}_{nombre}.jpg   ← una imagen por producto
-productos.csv               ← datos de todos los productos
-```
-
-### Columnas del CSV
+## Columnas del CSV
 
 | Columna | Descripción |
 |---|---|
@@ -94,12 +128,16 @@ productos.csv               ← datos de todos los productos
 
 ```
 Scraper/
-├── config.py       ← URL, selectores y parámetros
-├── main.py         ← Punto de entrada (CLI + logging)
-├── scraper.py      ← Navegación, paginación y orquestación
-├── parser.py       ← Extracción de campos con BeautifulSoup
-├── downloader.py   ← Descarga y caché de imágenes
-└── storage.py      ← Escritura del CSV
+├── config.py           ← URL, selectores y parámetros
+├── main.py             ← Punto de entrada (CLI + logging)
+├── output_manager.py   ← Carpeta dinámica y log de sesión
+├── scraper.py          ← Navegación, paginación y orquestación
+├── parser.py           ← Extracción de campos con BeautifulSoup
+├── downloader.py       ← Descarga de imágenes con deduplicación MD5
+├── storage.py          ← Escritura del CSV
+├── html_cache.py       ← Caché de HTML en disco (FASE 1)
+├── url_manager.py      ← Carga de URLs y menú interactivo
+└── urls.txt            ← URLs a scrapear (una por línea)
 ```
 
 ## Sitio de prueba
@@ -108,5 +146,12 @@ El proyecto viene preconfigurado para [books.toscrape.com](https://books.toscrap
 
 ```bash
 python main.py
-# Scrapes 2 páginas (40 libros) con imágenes y CSV incluidos
+```
+
+Genera automáticamente:
+```
+books.toscrape.com_2026-03-15/
+    ├── productos.csv
+    ├── imagenes_productos/
+    └── scraper.log
 ```

@@ -6,6 +6,46 @@ Versionado semántico: [SemVer](https://semver.org/lang/es/).
 
 ---
 
+## [1.1.0] - 2026-03-15
+
+### Agregado
+- `output_manager.py`: nuevo módulo con dos responsabilidades:
+  - `create_output_dir(url)`: crea la carpeta de salida `{sitio}_{YYYY-MM-DD}/`
+    extrayendo el nombre del sitio de la URL scrapeada.
+  - `setup_file_logging(output_dir)` / `teardown_file_logging(handler)`:
+    agrega un `FileHandler` al logger raíz que escribe `scraper.log` dentro
+    de la carpeta de salida, registrando fecha/hora de inicio y fin de sesión.
+
+### Modificado
+- `downloader.py`: deduplicación de imágenes en dos niveles:
+  - **Nivel 1 (nombre)**: si el archivo de destino ya existe en disco, se omite
+    sin calcular MD5 (comportamiento de caché preexistente, sin cambios).
+  - **Nivel 2 (MD5)**: se descarga el contenido a un buffer en memoria, se
+    calcula su MD5 y se compara contra el índice de sesión. Si el hash ya existe
+    (misma imagen con distinto nombre de archivo), se descarta el buffer y se
+    registra en el log el archivo original con ese contenido.
+  - Nueva función pública `init_dedup_index(images_dir)`: construye el índice
+    MD5 `{md5_hex → Path}` a partir de las imágenes existentes. Debe llamarse
+    una vez por sesión antes de empezar a descargar.
+- `main.py`:
+  - Integra `output_manager.create_output_dir()` por cada URL procesada.
+  - Integra `output_manager.setup_file_logging()` / `teardown_file_logging()`.
+  - Llama a `downloader.init_dedup_index()` con la carpeta de imágenes de sesión.
+  - Actualiza `config.OUTPUT_CSV` y `config.IMAGES_DIR` en tiempo de ejecución
+    para que todos los módulos escriban dentro de la carpeta de salida correcta.
+  - Elimina `_csv_path_for_url()` (reemplazado por `output_manager`).
+  - Agrega resumen visual de la estructura de archivos generada al finalizar.
+
+### Estructura de salida por ejecución
+```
+{nombre_sitio}_{YYYY-MM-DD}/
+    ├── productos.csv          ← datos scrapeados
+    ├── imagenes_productos/    ← imágenes descargadas
+    └── scraper.log            ← log completo de la sesión
+```
+
+---
+
 ## [1.0.0] - 2026-03-15
 
 ### Agregado
